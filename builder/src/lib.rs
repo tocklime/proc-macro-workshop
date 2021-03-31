@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal, Span};
 use quote::{quote, quote_spanned};
 use syn::{self, parse_macro_input, spanned::Spanned, Data, DeriveInput, Lit, Type};
+use if_chain::if_chain;
 
 struct FieldDef<'a> {
     name: &'a Ident,
@@ -24,22 +25,21 @@ impl<'a> TryFrom<&'a syn::Field> for FieldDef<'a> {
             .collect::<Vec<_>>();
         for at in builder_attrs {
             let meta = at.parse_meta()?;
-            if let syn::Meta::List(x) = &meta {
-                if x.nested.len() == 1 {
-                    if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &x.nested[0] {
-                        if nv.path.is_ident("each") {
-                            if let Lit::Str(s) = &nv.lit {
-                                each_fn = Some(s.value());
-                                continue;
-                            }
-                        }
-                    }
+            if_chain! {
+                if let syn::Meta::List(x) = &meta;
+                if x.nested.len() == 1;
+                if let syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) = &x.nested[0];
+                if nv.path.is_ident("each");
+                if let Lit::Str(s) = &nv.lit;
+                then {
+                    each_fn = Some(s.value());
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        meta,
+                        "expected `builder(each = \"...\")`",
+                    ));
                 }
-            }
-            return Err(syn::Error::new_spanned(
-                meta,
-                "expected `builder(each = \"...\")`",
-            ));
+            };
         }
         Ok(Self { name, ty, each_fn })
     }
@@ -50,24 +50,26 @@ fn fields(data: &Data, span_for_err: Span) -> Result<Vec<FieldDef>, syn::Error> 
             return fields.named.iter().map(|f| FieldDef::try_from(f)).collect();
         }
     }
-    Err(syn::Error::new(span_for_err, "Expected struct with named fields"))
+    Err(syn::Error::new(
+        span_for_err,
+        "Expected struct with named fields",
+    ))
 }
 fn unwrap_singleton_generic<'a>(ty: &'a Type, outer_name: &str) -> Option<&'a Type> {
-    if let Type::Path(tp) = ty {
+    if_chain! {
+        if let Type::Path(tp) = ty;
         if tp.qself.is_none()
             && tp.path.segments.len() == 1
-            && tp.path.segments[0].ident.to_string() == outer_name
-        {
-            if let syn::PathArguments::AngleBracketed(ab) = &tp.path.segments[0].arguments {
-                if ab.args.len() == 1 {
-                    if let syn::GenericArgument::Type(ty) = &ab.args[0] {
-                        return Some(ty);
-                    }
-                }
-            }
+            && tp.path.segments[0].ident.to_string() == outer_name;
+        if let syn::PathArguments::AngleBracketed(ab) = &tp.path.segments[0].arguments;
+        if ab.args.len() == 1;
+        if let syn::GenericArgument::Type(ty) = &ab.args[0];
+        then {
+            Some(ty)
+        } else {
+            None
         }
     }
-    None
 }
 
 fn mk_decls(fields: &[FieldDef]) -> proc_macro2::TokenStream {
@@ -104,46 +106,51 @@ fn mk_builds(fields: &[FieldDef]) -> proc_macro2::TokenStream {
     quote! {#(#list),*}
 }
 fn mk_setters(fields: &[FieldDef]) -> syn::Result<proc_macro2::TokenStream> {
-    let list = fields.iter().map(|FieldDef { name, ty, each_fn }| -> syn::Result<proc_macro2::TokenStream> {
-        let inner = unwrap_singleton_generic(ty, "Option").unwrap_or(ty);
-        Ok(match &each_fn {
-            Some(e) => {
-                let inner : Result<&Type, syn::Error> = unwrap_singleton_generic(ty, "Vec")
-                    .ok_or_else(|| syn::Error::new(ty.span(), "Expected Vec type here"));
-                let inner = inner?;
-                let each_ident = Ident::new(e, name.span());
-                if &name.to_string() == e {
-                    //each_fn, colliding name
-                    quote! {
-                        fn #each_ident(&mut self, #name: #inner) -> &mut Self {
-                            self.#name.push(#name);
-                            self
+    let list = fields
+        .iter()
+        .map(
+            |FieldDef { name, ty, each_fn }| -> syn::Result<proc_macro2::TokenStream> {
+                let inner = unwrap_singleton_generic(ty, "Option").unwrap_or(ty);
+                Ok(match &each_fn {
+                    Some(e) => {
+                        let inner: Result<&Type, syn::Error> = unwrap_singleton_generic(ty, "Vec")
+                            .ok_or_else(|| syn::Error::new(ty.span(), "Expected Vec type here"));
+                        let inner = inner?;
+                        let each_ident = Ident::new(e, name.span());
+                        if &name.to_string() == e {
+                            //each_fn, colliding name
+                            quote! {
+                                fn #each_ident(&mut self, #name: #inner) -> &mut Self {
+                                    self.#name.push(#name);
+                                    self
+                                }
+                            }
+                        } else {
+                            //each_fn, different name
+                            quote! {
+                                fn #each_ident(&mut self, #name: #inner) -> &mut Self {
+                                    self.#name.push(#name);
+                                    self
+                                }
+                                fn #name(&mut self, #name: #ty) -> &mut Self {
+                                    self.#name = #name;
+                                    self
+                                }
+                            }
                         }
                     }
-                } else {
-                    //each_fn, different name
-                    quote! {
-                        fn #each_ident(&mut self, #name: #inner) -> &mut Self {
-                            self.#name.push(#name);
-                            self
-                        }
-                        fn #name(&mut self, #name: #ty) -> &mut Self {
-                            self.#name = #name;
-                            self
+                    None => {
+                        quote! {
+                            fn #name(&mut self, #name: #inner) -> &mut Self {
+                                self.#name = Some(#name);
+                                self
+                            }
                         }
                     }
-                }
-            }
-            None => {
-                quote! {
-                    fn #name(&mut self, #name: #inner) -> &mut Self {
-                        self.#name = Some(#name);
-                        self
-                    }
-                }
-            }
-        })
-    }).collect::<Result<Vec<_>,_>>()?;
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(quote! {#(#list)*})
 }
 

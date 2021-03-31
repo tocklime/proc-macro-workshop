@@ -19,3 +19,4 @@ trybuild = { version = "1.0", features = ["diff"] }
 syn = {version = "1.0", features = ["extra-traits"]}
 quote = "1.0"
 proc-macro2 = "1.0"
+if_chain = "1.0.1"
