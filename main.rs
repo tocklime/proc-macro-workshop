@@ -7,17 +7,26 @@
 //     $ cargo run
 
 
-use derive_builder::Builder;
-#[derive(Builder)]
-pub struct Command {
-    executable: String,
-    args: Vec<String>,
-    env: Vec<String>,
-    current_dir: Option<String>,
+use sorted::sorted;
+
+use std::fmt::{self, Display};
+use std::io;
+
+#[sorted]
+pub enum Error {
+    Fmt(fmt::Error),
+    Io(io::Error),
 }
 
-fn main() {
-    let builder = Command::builder();
-
-    let _ = builder;
+impl Display for Error {
+    #[sorted::check]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        #[sorted]
+        match self {
+            Error::Io(e) => write!(f, "{}", e),
+            Error::Fmt(e) => write!(f, "{}", e),
+        }
+    }
 }
+
+fn main() {}
