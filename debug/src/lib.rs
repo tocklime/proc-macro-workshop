@@ -1,5 +1,6 @@
 use std::{collections::HashSet, convert::TryFrom};
 
+use if_chain::if_chain;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{
@@ -135,17 +136,19 @@ fn mk_debug_fields(fields: &[FieldDef]) -> proc_macro2::TokenStream {
 fn get_explicit_bounds(attrs: &[Attribute]) -> syn::Result<Vec<proc_macro2::TokenStream>> {
     let mut ans = Vec::new();
     for at in attrs.iter() {
-        if at.path.is_ident("debug") {
+        if_chain! {
+            if at.path.is_ident("debug");
             let meta = at.parse_meta()?;
-            if let Meta::List(l) = &meta {
+            if let Meta::List(l) = &meta;
+            then {
                 for a in l.nested.iter() {
-                    if let syn::NestedMeta::Meta(m) = a {
-                        if let Meta::NameValue(nv) = m {
-                            if nv.path.is_ident("bound") {
-                                if let syn::Lit::Str(s) = &nv.lit {
-                                    ans.push(s.value().parse()?);
-                                }
-                            }
+                    if_chain! {
+                        if let syn::NestedMeta::Meta(m) = a;
+                        if let Meta::NameValue(nv) = m;
+                        if nv.path.is_ident("bound");
+                        if let syn::Lit::Str(s) = &nv.lit;
+                        then {
+                            ans.push(s.value().parse()?);
                         }
                     }
                 }
@@ -160,26 +163,26 @@ fn mk_derive(mut input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let name = &input.ident;
     let name_as_str = proc_macro2::Literal::string(&name.to_string());
-    let fs = fields(&input.data, input.span())?;
+    let fields = fields(&input.data, input.span())?;
 
-    let field_uses = mk_debug_fields(&fs);
+    let debug_field_invocations = mk_debug_fields(&fields);
 
-    let gens = GenericAnalysis::from_generics(&mut input.generics, &fs);
+    let generic_analysis = GenericAnalysis::from_generics(&mut input.generics, &fields);
     if explicit_bounds.is_empty() {
-        gens.add_trait_bounds(&mut input.generics);
+        generic_analysis.add_trait_bounds(&mut input.generics);
     }
     let (impl_generics, ty_generics, _where_clause) = input.generics.split_for_impl();
     let where_clause = if !explicit_bounds.is_empty() {
         Some(quote! { where #(#explicit_bounds),* })
     } else {
-        gens.mk_auto_where_clause()
+        generic_analysis.mk_auto_where_clause()
     };
 
     Ok(quote! {
         impl #impl_generics std::fmt::Debug for #name #ty_generics #where_clause {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
                 f.debug_struct(#name_as_str)
-                 #field_uses
+                 #debug_field_invocations
                  .finish()
             }
         }
