@@ -1,15 +1,14 @@
 use std::{collections::HashSet, convert::TryFrom};
 
-use proc_macro::TokenStream;
-use proc_macro2::{Ident, Span};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{
-    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, GenericParam, Generics,
-    Meta, Path, Type,
+    parse_macro_input, parse_quote, spanned::Spanned, Attribute, Data, DeriveInput, GenericParam,
+    Generics, Meta, Path, Type,
 };
 
 #[proc_macro_derive(CustomDebug, attributes(debug))]
-pub fn derive(input: TokenStream) -> TokenStream {
+pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     mk_derive(input)
         .unwrap_or_else(syn::Error::into_compile_error)
@@ -57,14 +56,14 @@ fn fields(data: &Data, span_for_err: Span) -> Result<Vec<FieldDef>, syn::Error> 
 }
 #[derive(Default)]
 struct GenericAnalysis<'a> {
-    declared_generics: HashSet<&'a Ident>,
+    declared_generics: HashSet<Ident>,
     used_generics: HashSet<&'a Ident>,
     used_assocs: HashSet<&'a Path>,
 }
 
 impl<'a> GenericAnalysis<'a> {
-    fn set_declared(&mut self, generics: &'a Generics) -> &mut Self {
-        self.declared_generics = generics.type_params().map(|x| &x.ident).collect();
+    fn set_declared(&mut self, generics: &Generics) -> &mut Self {
+        self.declared_generics = generics.type_params().map(|x| &x.ident).cloned().collect();
         self
     }
     fn analyse_use(&mut self, t: &'a Type) {
@@ -91,6 +90,31 @@ impl<'a> GenericAnalysis<'a> {
             }
         }
     }
+    fn from_generics(generics: &Generics, fields: &'a [FieldDef]) -> Self {
+        let mut gens = Self::default();
+        gens.set_declared(generics);
+        fields.iter().for_each(|x| gens.analyse_use(x.ty));
+        gens
+    }
+    fn mk_auto_where_clause(&self) -> Option<TokenStream> {
+        if !self.used_assocs.is_empty() {
+            let assocs = self.used_assocs.iter().map(|t| {
+                quote! { #t : std::fmt::Debug }
+            });
+            Some(quote! { where #(#assocs),* })
+        } else {
+            None
+        }
+    }
+    fn add_trait_bounds(&self, generics: &mut Generics) {
+        for param in &mut generics.params {
+            if let GenericParam::Type(ref mut type_param) = *param {
+                if self.used_generics.contains(&type_param.ident) {
+                    type_param.bounds.push(parse_quote!(std::fmt::Debug))
+                }
+            }
+        }
+    }
 }
 
 fn mk_debug_fields(fields: &[FieldDef]) -> proc_macro2::TokenStream {
@@ -107,38 +131,48 @@ fn mk_debug_fields(fields: &[FieldDef]) -> proc_macro2::TokenStream {
     });
     quote! { #(#list)* }
 }
-fn add_trait_bounds(mut generics: Generics, used_generics: &HashSet<&Ident>) -> Generics {
-    for param in &mut generics.params {
-        if let GenericParam::Type(ref mut type_param) = *param {
-            if used_generics.contains(&type_param.ident) {
-                type_param.bounds.push(parse_quote!(std::fmt::Debug))
+
+fn get_explicit_bounds(attrs: &[Attribute]) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let mut ans = Vec::new();
+    for at in attrs.iter() {
+        if at.path.is_ident("debug") {
+            let meta = at.parse_meta()?;
+            if let Meta::List(l) = &meta {
+                for a in l.nested.iter() {
+                    if let syn::NestedMeta::Meta(m) = a {
+                        if let Meta::NameValue(nv) = m {
+                            if nv.path.is_ident("bound") {
+                                if let syn::Lit::Str(s) = &nv.lit {
+                                    ans.push(s.value().parse()?);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    generics
+    Ok(ans)
 }
 
-fn mk_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn mk_derive(mut input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let explicit_bounds = get_explicit_bounds(&input.attrs)?;
+
     let name = &input.ident;
     let name_as_str = proc_macro2::Literal::string(&name.to_string());
     let fs = fields(&input.data, input.span())?;
-    let mut gens = GenericAnalysis::default();
-    let my_generics = input.generics.clone();
-    gens.set_declared(&my_generics);
-    for fd in &fs {
-        gens.analyse_use(fd.ty);
-    }
-    let field_uses = mk_debug_fields(&fs);
-    let generics = add_trait_bounds(input.generics, &gens.used_generics);
-    let (impl_generics, ty_generics, _where_clause) = generics.split_for_impl();
 
-    let where_clause = if gens.used_assocs.is_empty() {
-        proc_macro2::TokenStream::new()
+    let field_uses = mk_debug_fields(&fs);
+
+    let gens = GenericAnalysis::from_generics(&mut input.generics, &fs);
+    if explicit_bounds.is_empty() {
+        gens.add_trait_bounds(&mut input.generics);
+    }
+    let (impl_generics, ty_generics, _where_clause) = input.generics.split_for_impl();
+    let where_clause = if !explicit_bounds.is_empty() {
+        Some(quote! { where #(#explicit_bounds),* })
     } else {
-        let assocs = gens.used_assocs.iter().map(|t| {
-            quote! { #t : std::fmt::Debug }
-        });
-        quote! { where #(#assocs),* }
+        gens.mk_auto_where_clause()
     };
 
     Ok(quote! {
