@@ -1,58 +1,31 @@
-// There are some cases where no heuristic would be sufficient to infer the
-// right trait bounds based only on the information available during macro
-// expansion.
+// The macro invocation in the previous test case contained an empty loop body
+// inside the braces. In reality we want for the macro to accept arbitrary
+// tokens inside the braces.
 //
-// When this happens, we'll turn to attributes as a way for the caller to
-// handwrite the correct trait bounds themselves.
+// The caller should be free to write whatever they want inside the braces. The
+// seq macro won't care whether they write a statement, or a function, or a
+// struct, or whatever else. So we will work with the loop body as a TokenStream
+// rather than as a syntax tree.
 //
-// The impl for Wrapper<T> in the code below will need to include the bounds
-// provided in the `debug(bound = "...")` attribute. When such an attribute is
-// present, also disable all inference of bounds so that the macro does not
-// attach its own `T: Debug` inferred bound.
+// Before moving on, ensure that your implementation knows what has been written
+// inside the curly braces as a value of type TokenStream.
 //
-//     impl<T: Trait> Debug for Wrapper<T>
-//     where
-//         T::Value: Debug,
-//     {...}
 //
-// Optionally, though this is not covered by the test suite, also accept
-// `debug(bound = "...")` attributes on individual fields. This should
-// substitute only whatever bounds are inferred based on that field's type,
-// without removing bounds inferred based on the other fields:
+// Resources:
 //
-//     #[derive(CustomDebug)]
-//     pub struct Wrapper<T: Trait, U> {
-//         #[debug(bound = "T::Value: Debug")]
-//         field: Field<T>,
-//         normal: U,
-//     }
+//   - Explanation of the purpose of proc-macro2:
+//     https://docs.rs/proc-macro2/1.0/proc_macro2/
 
-use derive_debug::CustomDebug;
-use std::fmt::Debug;
+use seq::seq;
 
-pub trait Trait {
-    type Value;
+macro_rules! expand_to_nothing {
+    ($arg:literal) => {
+        // nothing
+    };
 }
 
-#[derive(CustomDebug)]
-#[debug(bound = "T::Value: Debug")]
-pub struct Wrapper<T: Trait> {
-    field: Field<T>,
-}
+seq!(N in 0..4 {
+    expand_to_nothing!(N);
+});
 
-#[derive(CustomDebug)]
-struct Field<T: Trait> {
-    values: Vec<T::Value>,
-}
-
-fn assert_debug<F: Debug>() {}
-
-fn main() {
-    struct Id;
-
-    impl Trait for Id {
-        type Value = u8;
-    }
-
-    assert_debug::<Wrapper<Id>>();
-}
+fn main() {}
