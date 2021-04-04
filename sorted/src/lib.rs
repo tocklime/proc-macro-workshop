@@ -1,13 +1,13 @@
 use proc_macro::TokenStream;
-use syn::{Item, Pat, parse_macro_input, spanned::Spanned, visit_mut::VisitMut};
-use quote::quote;
+use quote::{quote, ToTokens};
+use syn::{parse_macro_input, spanned::Spanned, visit_mut::VisitMut, Item, Pat, Path};
 
 struct OrderChecker {
-    seen: Vec<String>
+    seen: Vec<String>,
 }
 impl OrderChecker {
     fn new() -> Self {
-        Self {seen: Vec::new()}
+        Self { seen: Vec::new() }
     }
     fn try_add(&mut self, new_elem: String) -> Result<(), String> {
         let first_less_than = self.seen.iter().find(|&n| &new_elem < n);
@@ -18,30 +18,50 @@ impl OrderChecker {
         Ok(())
     }
 }
-struct MatchChecker{
-    checker_stack : Vec<Option<OrderChecker>>,
-    errs : Vec<syn::Error>
+struct MatchChecker {
+    checker_stack: Vec<Option<OrderChecker>>,
+    errs: Vec<syn::Error>,
 }
 impl MatchChecker {
     fn new() -> Self {
-        Self {errs: Vec::new(), checker_stack: Vec::new()}
+        Self {
+            errs: Vec::new(),
+            checker_stack: Vec::new(),
+        }
     }
+}
+
+fn path_to_string_and_span(p: &Path) -> (String, proc_macro2::TokenStream) {
+    (
+        p.segments
+            .iter()
+            .map(|x| x.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+        p.into_token_stream(),
+    )
 }
 
 impl syn::visit_mut::VisitMut for MatchChecker {
     fn visit_pat_mut(&mut self, i: &mut Pat) {
-        let id = match i {
-            Pat::Path(p) => {Some(&p.path)}
-            Pat::TupleStruct(ts) => {Some(&ts.path)}
-            Pat::Struct(s) => {Some(&s.path)}
-            _ => None
-        };
-        if let Some(path) = id {
-            let id_str = path.segments.iter().map(|x| x.ident.to_string()).collect::<Vec<_>>().join("::");
-            if let Some(checker) = self.checker_stack.last_mut().unwrap() {
-                if let Err(x) = checker.try_add(id_str) {
-                    self.errs.push(syn::Error::new_spanned(path, x));
+        if let Some(Some(checker)) = self.checker_stack.last_mut() {
+            let id = match i {
+                Pat::Path(p) => Some(path_to_string_and_span(&p.path)),
+                Pat::TupleStruct(p) => Some(path_to_string_and_span(&p.path)),
+                Pat::Struct(p) => Some(path_to_string_and_span(&p.path)),
+                Pat::Ident(s) => Some((s.ident.to_string(), s.into_token_stream())),
+                Pat::Wild(x) => Some(("_".to_owned(), x.to_token_stream())),
+                _ => None,
+            };
+            match id {
+                Some((id_str, span)) => {
+                    if let Err(x) = checker.try_add(id_str) {
+                        self.errs.push(syn::Error::new_spanned(span, x));
+                    }
                 }
+                None => self
+                    .errs
+                    .push(syn::Error::new_spanned(i, "unsupported by #[sorted]")),
             }
         }
     }
@@ -49,7 +69,7 @@ impl syn::visit_mut::VisitMut for MatchChecker {
     fn visit_expr_match_mut(&mut self, i: &mut syn::ExprMatch) {
         let mut taken = Vec::new();
         std::mem::swap(&mut i.attrs, &mut taken);
-        let (sorted_attrs,rest) = taken.into_iter().partition(|a| a.path.is_ident("sorted"));
+        let (sorted_attrs, rest) = taken.into_iter().partition(|a| a.path.is_ident("sorted"));
         i.attrs = rest;
         if !sorted_attrs.is_empty() {
             self.checker_stack.push(Some(OrderChecker::new()));
@@ -60,7 +80,6 @@ impl syn::visit_mut::VisitMut for MatchChecker {
         self.checker_stack.pop();
     }
 }
-
 
 #[proc_macro_attribute]
 pub fn sorted(_args: TokenStream, input: TokenStream) -> TokenStream {
@@ -77,9 +96,9 @@ pub fn check(_args: TokenStream, input: TokenStream) -> TokenStream {
     let mut visiter = MatchChecker::new();
     visiter.visit_item_mut(&mut parsed_input);
     let mut result = quote! {
-        #parsed_input       
+        #parsed_input
     };
-    for e in visiter.errs {
+    if let Some(e) = visiter.errs.into_iter().next() {
         result.extend(e.into_compile_error())
     }
     result.into()
@@ -90,7 +109,7 @@ fn go(parsed_input: Item) -> syn::Result<()> {
         let mut oc = OrderChecker::new();
         for v in e.variants {
             if let Err(l) = oc.try_add(v.ident.to_string()) {
-                return Err(syn::Error::new( v.span(),l));
+                return Err(syn::Error::new(v.span(), l));
             }
         }
         Ok(())
